@@ -86,7 +86,14 @@ impl<T: Config> BenchBuilder<T> {
 		)
 	}
 
-	fn create_indexes(&self,seed: u32) -> (ParaId, CoreIndex, GroupIndex) {
+	fn relay_parent_number(&self) -> u32 {
+		(self.block_number - One::one())
+			.try_into()
+			.map_err(|_| ())
+			.expect("self.block_number is u32")
+	}
+
+	fn create_indexes(&self, seed: u32) -> (ParaId, CoreIndex, GroupIndex) {
 		let para_id = ParaId::from(seed);
 		let core_idx = CoreIndex(seed);
 		let group_idx =
@@ -251,7 +258,7 @@ impl<T: Config> BenchBuilder<T> {
 				// initialize session 2.
 				initializer::Pallet::<T>::test_trigger_on_new_session(
 					false,                                          // indicate the validator set has changed
-					session,                                    // session index
+					session,                                        // session index
 					validators.iter().map(|(a, v)| (a, v.clone())), // We don't want to change the validator set
 					None, // queued - when this is None validators are considered queued
 				);
@@ -306,13 +313,13 @@ impl<T: Config> BenchBuilder<T> {
 		self
 	}
 
-	fn create_fully_available_and_new_backed(
+	/// Marks `concluding_cores` as fully available.
+	fn create_availability_bitfields(
 		&self,
 		concluding_cores: BTreeSet<u32>,
-	) -> (Vec<BackedCandidate<T::Hash>>, Vec<UncheckedSigned<AvailabilityBitfield>>) {
+	) -> Vec<UncheckedSigned<AvailabilityBitfield>> {
 		let validators =
 			self.validators.as_ref().expect("must have some validators prior to calling");
-		let config = configuration::Pallet::<T>::config();
 
 		let availability_bitvec = Self::availability_bitvec(&concluding_cores);
 
@@ -331,8 +338,6 @@ impl<T: Config> BenchBuilder<T> {
 			})
 			.collect();
 
-		log::info!(target: LOG_TARGET, "c");
-
 		for seed in concluding_cores.iter() {
 			// make sure the candidates that are concluding by becoming available are marked as
 			// pending availability.
@@ -350,9 +355,21 @@ impl<T: Config> BenchBuilder<T> {
 			});
 		}
 
-		log::info!(target: LOG_TARGET, "d");
+		bitfields
+	}
 
-		let backed_candidates: Vec<BackedCandidate<T::Hash>> = concluding_cores
+	/// Create backed candidates for `cores_with_backed_candidates`.
+	// TODO currently you need these cores to be scheduled within paras inherent, which requires marking
+	// the available bitfields as fully available.
+	fn create_backed_candidates(
+		&self,
+		cores_with_backed_candidates: BTreeSet<u32>,
+	) -> Vec<BackedCandidate<T::Hash>> {
+		let validators =
+			self.validators.as_ref().expect("must have some validators prior to calling");
+		let config = configuration::Pallet::<T>::config();
+
+		cores_with_backed_candidates
 			.iter()
 			.map(|seed| {
 				let (para_id, _core_idx, group_idx) = self.create_indexes(seed.clone());
@@ -363,12 +380,9 @@ impl<T: Config> BenchBuilder<T> {
 				let relay_parent = header.hash();
 				let head_data: HeadData = Default::default();
 				let persisted_validation_data_hash = PersistedValidationData::<H256> {
-					parent_head: head_data.clone(), // dummy parent_head
-					relay_parent_number: (*header.number())
-						.try_into()
-						.map_err(|_| ())
-						.expect("header.number is valid"),
-					relay_parent_storage_root: Default::default(), // equivalent to header.storage_root,
+					parent_head: head_data.clone(),
+					relay_parent_number: self.relay_parent_number(),
+					relay_parent_storage_root: Default::default(),
 					max_pov_size: config.max_pov_size,
 				}
 				.hash();
@@ -404,7 +418,6 @@ impl<T: Config> BenchBuilder<T> {
 					descriptor: CandidateDescriptor::<T::Hash> {
 						para_id,
 						relay_parent,
-						// collator: collator_pair.public(),
 						collator: collator_public,
 						persisted_validation_data_hash,
 						pov_hash,
@@ -419,8 +432,7 @@ impl<T: Config> BenchBuilder<T> {
 						new_validation_code: None,
 						head_data, // HeadData
 						processed_downward_messages: 0,
-						// TODO this should use self.block_number
-						hrmp_watermark: 2u32, // current block should be 3, so this is watermark of parent
+						hrmp_watermark: self.relay_parent_number(),
 					},
 				};
 
@@ -430,7 +442,6 @@ impl<T: Config> BenchBuilder<T> {
 					.iter()
 					.map(|val_idx| {
 						let public = validators.get(val_idx.0 as usize).unwrap();
-						// let pair = validator_map.get(public).unwrap();
 						let sig = UncheckedSigned::<CompactStatement>::benchmark_sign(
 							public,
 							CompactStatement::Valid(candidate_hash.clone()),
@@ -449,11 +460,7 @@ impl<T: Config> BenchBuilder<T> {
 					validator_indices: bitvec::bitvec![bitvec::order::Lsb0, u8; 1; group_validators.len()],
 				}
 			})
-			.collect();
-
-		log::info!(target: LOG_TARGET, "e");
-
-		(backed_candidates, bitfields)
+			.collect()
 	}
 
 	fn create_disputes_with_some_spam(&self, start: u32, last: u32) -> Vec<DisputeStatementSet> {
@@ -461,8 +468,6 @@ impl<T: Config> BenchBuilder<T> {
 			self.validators.as_ref().expect("must have some validators prior to calling");
 		let config = configuration::Pallet::<T>::config();
 
-		log::info!(target: LOG_TARGET, "f");
-		log::info!(target: LOG_TARGET, "disputes with spam start {}, last {}", start, last);
 
 		let mut spam_count = 0;
 		(start..last)
@@ -507,9 +512,6 @@ impl<T: Config> BenchBuilder<T> {
 							DisputeStatement::Valid(ValidDisputeStatementKind::Explicit)
 						};
 						let data = dispute_statement.payload_data(candidate_hash.clone(), 2);
-
-						// let debug_res = validator_pair.public().sign(&data);
-						// println!("debug res validator sign {}", debug_res);
 						let statement_sig = validator_public.sign(&data).unwrap();
 
 						(dispute_statement, ValidatorIndex(validator_index), statement_sig)
@@ -549,20 +551,18 @@ impl<T: Config> BenchBuilder<T> {
 		let validator_ids = Self::generate_validator_pairs(Self::max_validators());
 		// Setup for session 1 and 2 along with the proper run_to_block logic
 
-		println!("Setting up session");
 		let target_session = SessionIndex::from(2u32);
 		let builder = self.setup_session(target_session, validator_ids);
-		println!("Session setup");
 
 		let concluding_cores: BTreeSet<_> = (0..backed_and_concluding).into_iter().collect();
-		let (backed_candidates, bitfields) =
-			builder.create_fully_available_and_new_backed(concluding_cores);
-		println!("Candidates setup");
+		let concluding_0: BTreeSet<_> = (0..0).into_iter().collect();
+
+		let bitfields = builder.create_availability_bitfields(concluding_cores.clone());
+		let backed_candidates = builder.create_backed_candidates(concluding_cores);
 
 		let last_disputed = backed_and_concluding + disputed;
 		assert!(last_disputed <= Self::cores());
 		let disputes = builder.create_disputes_with_some_spam(backed_and_concluding, last_disputed);
-		println!("Disputes created");
 
 		// spam slots are empty prior.
 		// TODO
@@ -745,7 +745,7 @@ benchmarks! {
 			b as usize
 		);
 
-		// exactly the disputed cores are schedule since they where freed.
+		// exactly the disputed cores are scheduled since they where freed.
 		assert_eq!(scheduler::Scheduled::<T>::get().len(), disputed as usize);
 
 		assert_eq!(
