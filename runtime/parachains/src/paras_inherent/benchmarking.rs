@@ -25,7 +25,7 @@ use primitives::v1::{
 	CoreIndex, CoreOccupied, DisputeStatement, DisputeStatementSet, GroupIndex, HeadData,
 	Id as ParaId, InvalidDisputeStatementKind, PersistedValidationData, SessionIndex,
 	SigningContext, UncheckedSigned, ValidDisputeStatementKind, ValidatorId, ValidatorIndex,
-	ValidityAttestation,
+	ValidityAttestation, ValidationCode
 };
 use sp_core::H256;
 use sp_runtime::{
@@ -388,7 +388,8 @@ impl<T: Config> BenchBuilder<T> {
 				.hash();
 
 				let pov_hash = Default::default();
-				let validation_code_hash = Default::default();
+				// note that we use the default `ValidationCode` when setting it in `setup_para_ids`.
+				let validation_code_hash = ValidationCode::default().hash();
 				let payload = collator_signature_payload(
 					&relay_parent,
 					&para_id,
@@ -404,13 +405,6 @@ impl<T: Config> BenchBuilder<T> {
 
 				let mut past_code_meta = paras::ParaPastCodeMeta::<T::BlockNumber>::default();
 				past_code_meta.note_replacement(0u32.into(), 0u32.into());
-
-				// TODO explain
-				paras::Pallet::<T>::past_code_meta_insert(&para_id, past_code_meta);
-				paras::Pallet::<T>::current_code_hash_insert(
-					&para_id,
-					validation_code_hash.clone(),
-				);
 
 				let group_validators = scheduler::Pallet::<T>::group_validators(group_idx).unwrap();
 
